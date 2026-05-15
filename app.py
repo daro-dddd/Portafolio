@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify, session, send_file
-from knowledge_base import get_topics, get_questions_for_round
+from knowledge_base import get_topics, get_questions_for_round, KNOWLEDGE_BASE
 import os
 import sys
 import io
@@ -15,7 +15,7 @@ if getattr(sys, 'frozen', False):
 else:
     app = Flask(__name__)
 
-app.secret_key = os.urandom(24)
+app.secret_key = os.environ.get('SECRET_KEY', 'clave_super_secreta_ceneval_produccion_12345')
 
 # ---------------------------------------------------------
 # SISTEMAS BASADOS EN EL CONOCIMIENTO Y MOTOR DE INFERENCIA
@@ -62,8 +62,8 @@ def load_next_round():
             load_next_round()
             return
         
-        # Guardamos en sesión las preguntas de esta ronda
-        session['current_round_questions'] = questions
+        # Guardamos en sesión SOLO los IDs de las preguntas de esta ronda para ahorrar memoria (límite de cookies)
+        session['current_round_questions'] = [q['id'] for q in questions]
         session['current_question_index'] = 0
         session['consecutive_correct'] = 0
         session['round_correct_total'] = 0
@@ -73,11 +73,15 @@ def load_next_round():
 
 def get_current_question():
     """Obtiene la pregunta actual de la ronda."""
-    questions = session.get('current_round_questions', [])
+    question_ids = session.get('current_round_questions', [])
     idx = session.get('current_question_index', 0)
     
-    if idx < len(questions) and session['questions_asked'] < 30:
-        return questions[idx]
+    if idx < len(question_ids) and session['questions_asked'] < 30:
+        q_id = question_ids[idx]
+        for topic in KNOWLEDGE_BASE:
+            for q in KNOWLEDGE_BASE[topic]:
+                if q['id'] == q_id:
+                    return q
     return None
 
 def advance_topic():
@@ -179,12 +183,8 @@ def submit_answer():
     session['questions_asked'] += 1
     session['history'].append({
         "id": q.get("id"),
-        "topic": q["topic"],
-        "difficulty": q["difficulty"],
         "is_correct": is_correct,
-        "question": q["question"],
-        "user_answer": user_answer,
-        "correct_answer": next(opt['text'] for opt in q['options'] if opt['is_correct'])
+        "user_answer": user_answer
     })
     
     # Razonamiento e Inferencia para adaptarse al usuario
@@ -281,13 +281,31 @@ def create_pdf_bytes():
     
     pdf.ln(10)
     for i, h in enumerate(history):
+        q_id = h.get('id')
+        
+        # Reconstruir la pregunta original desde KNOWLEDGE_BASE para no gastar sesión
+        q_original = None
+        for t in KNOWLEDGE_BASE:
+            for q in KNOWLEDGE_BASE[t]:
+                if q['id'] == q_id:
+                    q_original = q
+                    break
+            if q_original: break
+            
+        if not q_original: continue
+            
+        topic = q_original['topic']
+        difficulty = q_original['difficulty']
+        question_text = q_original['question']
+        correct_answer = next(opt['text'] for opt in q_original['options'] if opt['is_correct'])
+        
         pdf.set_font("helvetica", style="B", size=10)
-        pdf.multi_cell(0, 8, text=f"Pregunta {i+1} ({h['topic']} - Nivel {h['difficulty']}): {h['question']}", new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 8, text=f"Pregunta {i+1} ({topic} - Nivel {difficulty}): {question_text}", new_x="LMARGIN", new_y="NEXT")
         
         pdf.set_font("helvetica", size=10)
         pdf.multi_cell(0, 8, text=f"Tu respuesta: {h['user_answer']}", new_x="LMARGIN", new_y="NEXT")
         if not h['is_correct']:
-            pdf.multi_cell(0, 8, text=f"Respuesta correcta: {h['correct_answer']}", new_x="LMARGIN", new_y="NEXT")
+            pdf.multi_cell(0, 8, text=f"Respuesta correcta: {correct_answer}", new_x="LMARGIN", new_y="NEXT")
         
         resultado = "CORRECTO" if h['is_correct'] else "INCORRECTO"
         pdf.multi_cell(0, 8, text=f"Resultado: {resultado}", new_x="LMARGIN", new_y="NEXT")
